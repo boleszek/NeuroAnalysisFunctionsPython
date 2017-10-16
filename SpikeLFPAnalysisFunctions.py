@@ -284,7 +284,6 @@ def spike_field_coh(spike_times,field,sssf):
     # Assuming spike times are given in units of samples.
     # Also assuming LFP is subsampled by 10
     # This function bins spike times in bins of LFP sampling time, then computes coherence
-    from scipy.signal import coherence
     bw = 10
     bins = np.arange(0,10*len(field),bw)
     [binned_spikes,bleh] = np.histogram(spike_times,bins)
@@ -390,7 +389,7 @@ def SFC_wrapper(SPK_op,LFPb_op,sssf,no,nop,use_full_op_for_sfc,startb_op,stopb_o
     #########################################
     # INPUTS:
     # SPK_op              -  embeded list of spike times during odor pres (ordered by 1st index pres, 2nd index cell)
-    # LFPb_op             -  embeded list of LFP (ordered by 1st index pres, 2nd index cell)
+    # LFPb_op             -  embeded list of filtered LFP (ordered by 1st index pres, 2nd index cell)
     # sssf                -  sub sampled sampling frequency
     # no                  -  number of odors
     # nop                 -  number of presentations
@@ -444,8 +443,8 @@ def SFC_wrapper(SPK_op,LFPb_op,sssf,no,nop,use_full_op_for_sfc,startb_op,stopb_o
             for i in range(nop):
                 LFPb_cat = np.append(LFPb_cat,LFPb_op[i])
         
-            SPKb_cat = [None]*len(SPK)
-            for s in range(len(SPK)):
+            SPKb_cat = [None]*nspk
+            for s in range(nspk):
                 cumulative_time_shift = 0 # cumulative shift in time to concatenate spike times because each op starts from 0
                 SPKb_cat[s] = np.empty(0)
                 for i in range(nop):
@@ -461,7 +460,7 @@ def SFC_wrapper(SPK_op,LFPb_op,sssf,no,nop,use_full_op_for_sfc,startb_op,stopb_o
         SFCb_max = []
         SFCb_rand = []
         SFCb_rand_max = []
-        for i in range(len(SPK)):
+        for i in range(nspk):
             f, Cxy = spike_field_coh(SPKb_cat[i],LFPb_cat,sssf)
             SFCb.append(Cxy)
             Cxyrand = [];
@@ -530,9 +529,9 @@ def SFC_wrapper(SPK_op,LFPb_op,sssf,no,nop,use_full_op_for_sfc,startb_op,stopb_o
         
             SPKb_cat = []
             for o in range(no):
-                SPKb_cat_o_temp = [None]*len(SPK)
+                SPKb_cat_o_temp = [None]*nspk
                 inds = np.arange(o,nop*no,no)
-                for s in range(len(SPK)):
+                for s in range(nspk):
                     cumulative_time_shift = 0 # cumulative shift in time to concatenate spike times because each op starts from 0
                     SPKb_cat_o_temp[s] = np.empty(0)
                     for i in range(nop):
@@ -583,7 +582,6 @@ def exctract_LFP_trials(start,stop,nop,ssLFP):
     # ssLFP      -       sub sampled LFP
 
     ssLFP_op = list()
-    SPK_op = list()
     for i in range(nop):
         # remember, LFP is subsampled by 10
         ssLFP_op.append(ssLFP[int(start[i]/10):int(stop[i]/10)])
@@ -848,7 +846,7 @@ def classify_PSTH(PSTH,bw):
     
     return class_vec
 
-def get_peak_phase(data,edges):
+def get_peak_phase_gauss(data,edges):
     from scipy.optimize import curve_fit
     import math
 
@@ -886,3 +884,144 @@ def get_peak_phase(data,edges):
         peak_phase = np.abs(peak_phase) # sometimes 0 is returned as -0.0
 
     return peak_phase, mse, hist, hist_fit
+
+
+def get_peak_phase_sinORgauss(data,edges):
+    # Fits a sine and a gaussian to a histogram of the spike-phase product values in "data" binned into "edges".
+    # Returns the phase at the peak value of the fit with the lowest error.
+    # INPUTS:
+    # data      -  list of spike-phase products
+    # edges     -  edges from -pi to pi for binning data into histogram
+    from scipy.optimize import curve_fit
+    import math
+    
+    # Define sine function
+    def sinfunc(x, *p):
+        #A, w, p, c = p # if w (fq) is not fixed
+        A, p, c = p # fixed w
+        #return A * np.sin(w*x + p) + c
+        return A * np.sin(x + p) + c
+    
+    # Define gaussian
+    def gauss(x, *p):
+        A, mu, sigma = p
+        return A*np.exp(-(x-mu)**2/(2.*sigma**2))
+    
+    edge_step = edges[1]-edges[0]
+    hist, bin_edges = np.histogram(data, edges)
+    bin_centres = edges[0:-1]+edge_step/2
+    
+    # p0sin is the initial guess for the fitting coefficients (A, w, p, c)
+    #p0sin = [np.max(hist), 1, 0, np.max(hist)/2]
+    # p0sin is the initial guess for the fitting coefficients (A, p, c)
+    p0sin = [np.max(hist)/2, 0, np.max(hist)]
+    
+    # p0gauss is the initial guess for the fitting coefficients (A, mu and sigma)
+    p0gauss = [np.max(hist), bin_centres[np.argmax(hist)], 0.5]
+    
+    try:
+        coeff_sin, var_matrix_sin = curve_fit(sinfunc, bin_centres, hist, p0=p0sin, maxfev = 50000)
+        coeff_gauss, var_matrix_gauss = curve_fit(gauss, bin_centres, hist, p0=p0gauss, maxfev = 50000)
+        
+        # Get the fitted curve
+        hist_fit_sin = sinfunc(bin_centres, *coeff_sin)
+        hist_fit_gauss = gauss(bin_centres, *coeff_gauss)
+        
+        mse_sin = np.mean(np.square(hist_fit_sin-hist)) # mean sqared error of sine fit
+        mse_gauss = np.mean(np.square(hist_fit_gauss-hist)) # mean sqared error of gaussian fit
+        
+        if mse_sin < mse_gauss:
+            peak_phase = math.degrees(bin_centres[np.argmax(hist_fit_sin)]) # peak phase in degrees
+            mse = mse_sin
+            hist_fit = hist_fit_sin
+        else:
+            peak_phase = math.degrees(bin_centres[np.argmax(hist_fit_gauss)]) # peak phase in degrees
+            mse = mse_gauss
+            hist_fit = hist_fit_gauss
+        
+        peak_phase = np.round(peak_phase,decimals=1)
+    except:
+        # if both fits fail to evaluate then the hist is probably bad, but save the peak phase anyways
+        peak_phase = np.round(math.degrees(bin_centres[np.argmax(hist)]),decimals=1)
+        mse = np.nan
+        hist_fit = np.nan
+    
+    
+    if peak_phase == 0:
+        peak_phase = np.abs(peak_phase) # sometimes 0 is returned as -0.0
+    
+    return peak_phase, mse, hist, hist_fit
+
+def calc_DKL(SPHprod,RPHprod,edges,pc):
+    # Calculate DKL between real/fake data and uniform distribution for phist.
+    # Also calculate the pc'th percentile of the DKL for the shuffles.
+    # INPUTS:
+    # SPHprod     -   embended list of spike-phase products (length #clusters)
+    # RPHprod     -   embended list of shuffled spike-phase products (length #clusters, length #shuffles)
+    # edges       -   edges for bining histogram
+    # pc          -   percentile of shuffled dkl
+    ##########################################################
+    
+    nbins = len(edges)-1
+    nrand_ph = len(RPHprod[0])
+    nclust = len(SPHprod) # number of clusters
+    eps = 1e-15 # used for replacing 0s in hist
+    
+    DKL = []
+    DKL_rand = []
+    DKL_rand_percentile = []
+    unif_dist = np.ones(nbins) # uniform distribution
+    for i in range(nclust):
+        if SPHprod[i].size > 0: # only perform hist if spikes exist
+            [sph_hist,bleh]=np.histogram(SPHprod[i],edges)
+            # set 0 = eps to avoid Inf
+            sph_hist=sph_hist.astype('float') # must convert from int64 to float
+            sph_hist[sph_hist==0] = eps # set 0's = eps to avoid dividing by zero in
+            DKL.append(stats.entropy(sph_hist,unif_dist))
+            dklrand_temp = [] # initialize for storing random DKLs
+            for r in range(nrand_ph):
+                [sph_hist,bleh]=np.histogram(RPHprod[i][r],edges)
+                # set 0 = eps to avoid Inf
+                sph_hist=sph_hist.astype('float') # must convert from int64 to float
+                sph_hist[sph_hist==0] = eps
+                dklrand_temp.append(stats.entropy(sph_hist,unif_dist))
+            DKL_rand.append(dklrand_temp)
+            DKL_rand_percentile.append(np.percentile(dklrand_temp,pc)) # pc'th percentile
+        else:
+            DKL.append([])
+            DKL_rand.append([])
+            DKL_rand_percentile.append([])
+
+    return DKL, DKL_rand, DKL_rand_percentile
+
+def scandtrig_while(dtrig,skipdp):
+    '''
+    Unfortunately, the TTL pulses sometimes have multiple closely spaced repeats.
+    
+    This function scans the digital trigger (dtrig) to find the onsets of each
+    repeated pulse train, then skips a time skipdp (in samples) and starts
+    scanning again until no more triggers are detected
+    
+    NOTE: This function is meant to analyze OpenEphys event data triggered by
+    MedPC TTL.
+    
+    NOTE: skipdp must be big enough that the algorithm skips over the repeats
+    ,but small enough that it does not skip too far and miss the next real pulse!
+    
+    Boleszek Osinski (2017)
+    Kay Lab, University of Chicago
+    '''
+    
+    dtrig_clean = [dtrig[0]] # start with first pulse
+    ind = dtrig_clean # initialize
+    ii = 0
+    while len(ind)>0:
+        # prev_ind will update each time new pulse is detected
+        prev_ind = dtrig_clean[ii]
+        # start scan skipdp after prev_ind to skip over the transients
+        ind = np.where(dtrig>(prev_ind+skipdp))[0]
+        if len(ind)>0:
+            dtrig_clean.append(dtrig[ind[0]]) # append the 1st pulse at index ind[0]
+        ii = ii+1
+        
+    return dtrig_clean
